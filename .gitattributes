@@ -1,0 +1,4 @@
+# Scripts that run on Linux must keep LF line endings, even on Windows
+*.tpl text eol=lf
+*.sh  text eol=lf
+*.tf  text eol=lf

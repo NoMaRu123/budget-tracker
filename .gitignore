@@ -1,0 +1,20 @@
+# Python
+venv/
+__pycache__/
+.pytest_cache/
+
+# App data and logs (local only)
+*.db
+server.log
+
+# Front-end (also covered by frontend/.gitignore)
+node_modules/
+dist/
+
+# Terraform: state can contain secrets
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Course materials (lecturer slides, CA brief): private, never on GitHub
+course-materials/

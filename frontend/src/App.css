@@ -1,0 +1,85 @@
+/* Styles for the CRUD page.
+   The colours (--border, --accent, --bg...) are defined in index.css,
+   so the page follows the browser's light or dark mode automatically. */
+
+main {
+  padding: 0 24px 48px; /* space at the sides and the bottom */
+}
+
+/* The add / edit form: the boxes and buttons sit in one row */
+form {
+  display: flex;
+  flex-wrap: wrap; /* move onto a new line on small screens */
+  gap: 8px;
+  justify-content: center;
+  margin: 16px 0;
+}
+
+input,
+button {
+  font: inherit; /* same font as the rest of the page */
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-h);
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+/* The form's main button (Add / Save) */
+button[type='submit'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+
+/* Delete buttons: red text so they stand out */
+button.danger {
+  color: crimson;
+}
+
+/* Error messages from the backend, shown under the form */
+.error {
+  color: crimson;
+  margin-bottom: 16px;
+}
+
+/* The items table */
+table {
+  width: 100%;
+  border-collapse: collapse; /* one line between cells, not two */
+  text-align: left;
+}
+
+th,
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--text-h);
+  font-weight: 600;
+}
+
+/* The last column holds the Edit / Delete buttons */
+.actions {
+  text-align: right;
+  white-space: nowrap; /* keep both buttons on one line */
+}
+
+.actions button {
+  margin-left: 8px;
+}
+
+/* The row that is open in the form is highlighted */
+tr.editing {
+  background: var(--accent-bg);
+}
