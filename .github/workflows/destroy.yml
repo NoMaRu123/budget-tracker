@@ -1,0 +1,39 @@
+name: Destroy app stack           # demo step 8: stop the stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm'   # a safety check before deleting anything
+        required: true
+
+concurrency:
+  group: terraform                # same group as deploy, so they never overlap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    if: inputs.confirm == 'destroy'   # anything else: the job is skipped
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform init           # reads the state from the private S3 bucket
+        run: terraform init -input=false
+
+      - name: Terraform destroy
+        run: terraform destroy -auto-approve
