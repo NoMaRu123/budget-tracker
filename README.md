@@ -15,7 +15,7 @@ A budget and spending tracker, built as a SaaS app for the Cloud Application Dev
 backend/    ReST API: routes, database models, validation, tests
 frontend/   React app that calls the API
 infra/      Terraform files that create the AWS server and start the app
-notes/      Study notes and the project plan
+.github/    GitHub Actions workflows: CI (lint + tests), deploy and destroy
 ```
 
 ## Run it locally
