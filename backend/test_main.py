@@ -199,3 +199,107 @@ def test_delete_category_in_use():
 def test_delete_category_not_found():
     response = client.delete("/categories/99")
     assert response.status_code == 404
+
+
+# ---------- Transactions ----------
+
+def create_test_transaction(category_id, date="2026-10-03", amount_cents=1250, kind="expense"):
+    # a normal valid transaction; a test only changes the part it cares about
+    return client.post("/transactions/", json={
+        "date": date,
+        "description": "TESCO",
+        "amount_cents": amount_cents,
+        "type": kind,
+        "category_id": category_id,
+    })
+
+
+def test_create_transaction():
+    category_id = create_test_category().json()["id"]
+    response = create_test_transaction(category_id)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["date"] == "2026-10-03"
+    assert data["amount_cents"] == 1250
+    assert "id" in data
+
+
+def test_create_transaction_unknown_category():
+    response = create_test_transaction(category_id=99)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Category not found"}
+
+
+def test_create_transaction_zero_amount():
+    category_id = create_test_category().json()["id"]
+    response = create_test_transaction(category_id, amount_cents=0)
+    assert response.status_code == 422
+
+
+def test_create_transaction_bad_type():
+    category_id = create_test_category().json()["id"]
+    response = create_test_transaction(category_id, kind="gift")
+    assert response.status_code == 422
+
+
+def test_read_transactions_newest_first():
+    category_id = create_test_category().json()["id"]
+    create_test_transaction(category_id, date="2026-10-01")
+    create_test_transaction(category_id, date="2026-10-20")
+    response = client.get("/transactions/")
+    assert response.status_code == 200
+    assert [t["date"] for t in response.json()] == ["2026-10-20", "2026-10-01"]
+
+
+def test_read_transactions_filter_by_month():
+    category_id = create_test_category().json()["id"]
+    create_test_transaction(category_id, date="2026-11-30")   # day before December: left out
+    create_test_transaction(category_id, date="2026-12-01")   # first day: kept
+    create_test_transaction(category_id, date="2026-12-31")   # last day: kept
+    create_test_transaction(category_id, date="2027-01-01")   # next year: left out (December rollover)
+    response = client.get("/transactions/?month=2026-12")
+    assert [t["date"] for t in response.json()] == ["2026-12-31", "2026-12-01"]
+
+
+def test_read_transactions_bad_month():
+    response = client.get("/transactions/?month=2026-13")
+    assert response.status_code == 422
+
+
+def test_read_transactions_filter_by_category():
+    groceries_id = create_test_category("Groceries").json()["id"]
+    rent_id = create_test_category("Rent").json()["id"]
+    create_test_transaction(groceries_id)
+    create_test_transaction(rent_id)
+    data = client.get(f"/transactions/?category_id={rent_id}").json()
+    assert len(data) == 1
+    assert data[0]["category_id"] == rent_id
+
+
+def test_read_transaction_not_found():
+    response = client.get("/transactions/99")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Transaction not found"}
+
+
+def test_update_transaction():
+    category_id = create_test_category().json()["id"]
+    transaction_id = create_test_transaction(category_id).json()["id"]
+    response = client.put(f"/transactions/{transaction_id}", json={
+        "date": "2026-10-04",
+        "description": "Lidl",
+        "amount_cents": 900,
+        "type": "expense",
+        "category_id": category_id,
+    })
+    assert response.status_code == 200
+    assert response.json()["description"] == "Lidl"
+    assert response.json()["amount_cents"] == 900
+
+
+def test_delete_transaction():
+    category_id = create_test_category().json()["id"]
+    transaction_id = create_test_transaction(category_id).json()["id"]
+    response = client.delete(f"/transactions/{transaction_id}")
+    assert response.status_code == 200
+    assert client.get(f"/transactions/{transaction_id}").status_code == 404
