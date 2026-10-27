@@ -1,11 +1,13 @@
+import datetime as dt
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-
 from main import app, get_db
 from database import Base
+import models
 
 # In-memory test database: never touches the real test.db
 test_engine = create_engine(
@@ -117,4 +119,83 @@ def test_delete_item():
 
 def test_delete_item_not_found():
     response = client.delete("/items/99")
+    assert response.status_code == 404
+
+
+# ---------- Categories ----------
+
+def create_test_category(name="Groceries"):
+    return client.post("/categories/", json={"name": name})
+
+
+def test_create_category():
+    response = create_test_category(" Groceries ")
+    assert response.status_code == 201
+    data = response.json()
+    assert data["name"] == "Groceries"
+    assert "id" in data
+
+
+def test_create_category_blank_name():
+    response = create_test_category("   ")
+    assert response.status_code == 422
+
+
+def test_create_category_duplicate_name():
+    create_test_category("Groceries")
+    response = create_test_category("Groceries")
+    assert response.status_code == 409
+    assert response.json() == {"detail": "A category with this name already exists"}
+
+
+def test_read_categories_sorted_by_name():
+    create_test_category("Rent")
+    create_test_category("Groceries")
+    response = client.get("/categories/")
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["Groceries", "Rent"]
+
+
+def test_read_category_not_found():
+    response = client.get("/categories/99")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Category not found"}
+
+
+def test_update_category():
+    category_id = create_test_category("Rent").json()["id"]
+    response = client.put(f"/categories/{category_id}", json={"name": "Housing"})
+    assert response.status_code == 200
+    assert response.json() == {"id": category_id, "name": "Housing"}
+
+
+def test_update_category_to_existing_name():
+    create_test_category("Groceries")
+    rent_id = create_test_category("Rent").json()["id"]
+    response = client.put(f"/categories/{rent_id}", json={"name": "Groceries"})
+    assert response.status_code == 409
+
+
+def test_delete_category():
+    category_id = create_test_category().json()["id"]
+    response = client.delete(f"/categories/{category_id}")
+    assert response.status_code == 200
+    assert client.get(f"/categories/{category_id}").status_code == 404
+
+
+def test_delete_category_in_use():
+    category_id = create_test_category().json()["id"]
+    # there's no transaction route yet, so put a transaction straight into the TEST database:
+    db = TestingSessionLocal()
+    db.add(models.Transaction(date=dt.date(2026, 10, 3), description="TESCO", amount_cents=1250,
+                              type="expense", category_id=category_id))
+    db.commit()
+    db.close()
+    response = client.delete(f"/categories/{category_id}")
+    assert response.status_code == 409                                   # refused: still in use
+    assert client.get(f"/categories/{category_id}").status_code == 200   # and it's still there
+
+
+def test_delete_category_not_found():
+    response = client.delete("/categories/99")
     assert response.status_code == 404
