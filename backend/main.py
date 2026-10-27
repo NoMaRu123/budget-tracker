@@ -1,6 +1,7 @@
+import datetime as dt
 import logging
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from database import SessionLocal, engine
@@ -147,6 +148,80 @@ def delete_category(category_id: int, db: Session = Depends(get_db)):
     db.delete(db_category)
     db.commit()
     return {"message": "Category deleted successfully"}
+
+
+# ---------- Transactions ----------
+
+def get_transaction_or_404(transaction_id: int, db: Session):
+    transaction = db.get(models.Transaction, transaction_id)
+    if transaction is None:
+        logging.warning("Transaction %s not found", transaction_id)
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return transaction
+
+
+def month_range(month: str):
+    # "2026-10" -> (1 October 2026, 1 November 2026)
+    start = dt.date.fromisoformat(month + "-01")
+    if start.month == 12:
+        end = dt.date(start.year + 1, 1, 1)
+    else:
+        end = dt.date(start.year, start.month + 1, 1)
+    return start, end
+
+
+@app.post("/transactions/", response_model=schemas.Transaction, status_code=201)
+def create_transaction(transaction: schemas.TransactionCreate, db: Session = Depends(get_db)):
+    logging.info("CREATE TRANSACTION : %s", transaction)
+    get_category_or_404(transaction.category_id, db)
+    db_transaction = models.Transaction(**transaction.model_dump())
+    db.add(db_transaction)
+    db.commit()
+    db.refresh(db_transaction)
+    return db_transaction
+
+
+@app.get("/transactions/", response_model=list[schemas.Transaction])
+def read_transactions(
+    month: str | None = Query(default=None, pattern=schemas.MONTH_PATTERN),  # ?month=2026-10 (optional)
+    category_id: int | None = None,                                         # ?category_id=3 (optional)
+    db: Session = Depends(get_db),
+):
+    logging.info("READ ALL TRANSACTIONS : month=%s category_id=%s", month, category_id)
+    query = db.query(models.Transaction)
+    if month is not None:
+        start, end = month_range(month)
+        query = query.filter(models.Transaction.date >= start, models.Transaction.date < end)
+    if category_id is not None:
+        query = query.filter(models.Transaction.category_id == category_id)
+    return query.order_by(models.Transaction.date.desc(), models.Transaction.id.desc()).all()
+
+
+@app.get("/transactions/{transaction_id}", response_model=schemas.Transaction)
+def read_transaction(transaction_id: int, db: Session = Depends(get_db)):
+    logging.info("READ TRANSACTION : %s", transaction_id)
+    return get_transaction_or_404(transaction_id, db)
+
+
+@app.put("/transactions/{transaction_id}", response_model=schemas.Transaction)
+def update_transaction(transaction_id: int, transaction: schemas.TransactionCreate, db: Session = Depends(get_db)):
+    logging.info("UPDATE TRANSACTION : %s -> %s", transaction_id, transaction)
+    db_transaction = get_transaction_or_404(transaction_id, db)
+    get_category_or_404(transaction.category_id, db)
+    for field, value in transaction.model_dump().items():
+        setattr(db_transaction, field, value)
+    db.commit()
+    db.refresh(db_transaction)
+    return db_transaction
+
+
+@app.delete("/transactions/{transaction_id}")
+def delete_transaction(transaction_id: int, db: Session = Depends(get_db)):
+    logging.info("DELETE TRANSACTION : %s", transaction_id)
+    db_transaction = get_transaction_or_404(transaction_id, db)
+    db.delete(db_transaction)
+    db.commit()
+    return {"message": "Transaction deleted successfully"}
 
 
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"

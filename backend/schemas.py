@@ -21,6 +21,7 @@ class Item(ItemBase):
 
 
 MAX_CENTS = 100_000_000
+MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
 
 
 class CategoryBase(BaseModel):
@@ -59,7 +60,7 @@ class Transaction(TransactionBase):
 
 
 class BudgetBase(BaseModel):
-    month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    month: str = Field(pattern=MONTH_PATTERN)
     limit_cents: int = Field(gt=0, le=MAX_CENTS)
     category_id: int = Field(gt=0)
 
