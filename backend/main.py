@@ -224,6 +224,69 @@ def delete_transaction(transaction_id: int, db: Session = Depends(get_db)):
     return {"message": "Transaction deleted successfully"}
 
 
+# ---------- Budgets ----------
+
+BUDGET_EXISTS = "A budget for this category and month already exists"
+
+
+def get_budget_or_404(budget_id: int, db: Session):
+    budget = db.get(models.Budget, budget_id)
+    if budget is None:
+        logging.warning("Budget %s not found", budget_id)
+        raise HTTPException(status_code=404, detail="Budget not found")
+    return budget
+
+
+@app.post("/budgets/", response_model=schemas.Budget, status_code=201)
+def create_budget(budget: schemas.BudgetCreate, db: Session = Depends(get_db)):
+    logging.info("CREATE BUDGET : %s", budget)
+    get_category_or_404(budget.category_id, db)
+    db_budget = models.Budget(**budget.model_dump())
+    db.add(db_budget)
+    commit_or_409(db, BUDGET_EXISTS)
+    db.refresh(db_budget)
+    return db_budget
+
+
+@app.get("/budgets/", response_model=list[schemas.Budget])
+def read_budgets(
+    month: str | None = Query(default=None, pattern=schemas.MONTH_PATTERN),  # ?month=2026-10 (optional)
+    db: Session = Depends(get_db),
+):
+    logging.info("READ ALL BUDGETS : month=%s", month)
+    query = db.query(models.Budget)
+    if month is not None:
+        query = query.filter(models.Budget.month == month)
+    return query.order_by(models.Budget.month.desc(), models.Budget.category_id).all()
+
+
+@app.get("/budgets/{budget_id}", response_model=schemas.Budget)
+def read_budget(budget_id: int, db: Session = Depends(get_db)):
+    logging.info("READ BUDGET : %s", budget_id)
+    return get_budget_or_404(budget_id, db)
+
+
+@app.put("/budgets/{budget_id}", response_model=schemas.Budget)
+def update_budget(budget_id: int, budget: schemas.BudgetCreate, db: Session = Depends(get_db)):
+    logging.info("UPDATE BUDGET : %s -> %s", budget_id, budget)
+    db_budget = get_budget_or_404(budget_id, db)
+    get_category_or_404(budget.category_id, db)
+    for field, value in budget.model_dump().items():
+        setattr(db_budget, field, value)
+    commit_or_409(db, BUDGET_EXISTS)
+    db.refresh(db_budget)
+    return db_budget
+
+
+@app.delete("/budgets/{budget_id}")
+def delete_budget(budget_id: int, db: Session = Depends(get_db)):
+    logging.info("DELETE BUDGET : %s", budget_id)
+    db_budget = get_budget_or_404(budget_id, db)
+    db.delete(db_budget)
+    db.commit()
+    return {"message": "Budget deleted successfully"}
+
+
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 if FRONTEND_DIST.exists():
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
