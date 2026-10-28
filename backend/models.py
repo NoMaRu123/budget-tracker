@@ -4,14 +4,6 @@ from sqlalchemy.orm import relationship
 from database import Base
 
 
-class Item(Base):
-    __tablename__ = "items"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, index=True, nullable=False, unique=True)
-    description = Column(String, index=True)
-
-
 class Category(Base):
     __tablename__ = "categories"
 

@@ -32,7 +32,7 @@ def get_db():
         db.close()
 
 
-def commit_or_409(db: Session, detail: str = "An item with this name already exists"):
+def commit_or_409(db: Session, detail: str):
     try:
         db.commit()
     except IntegrityError:
@@ -41,59 +41,9 @@ def commit_or_409(db: Session, detail: str = "An item with this name already exi
         raise HTTPException(status_code=409, detail=detail)
 
 
-def get_item_or_404(item_id: int, db: Session):
-    item = db.query(models.Item).filter(models.Item.id == item_id).first()
-    if item is None:
-        logging.warning("Item %s not found", item_id)
-        raise HTTPException(status_code=404, detail="Item not found")
-    return item
-
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-@app.post("/items/", response_model=schemas.Item)
-def create_item(item: schemas.ItemCreate, db: Session = Depends(get_db)):
-    logging.info("CREATE : %s", item)
-    db_item = models.Item(**item.model_dump())
-    db.add(db_item)
-    commit_or_409(db)
-    db.refresh(db_item)
-    return db_item
-
-
-@app.get("/items/", response_model=list[schemas.Item])
-def read_items(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    logging.info("READ ALL : skip=%s limit=%s", skip, limit)
-    return db.query(models.Item).offset(skip).limit(limit).all()
-
-
-@app.get("/items/{item_id}", response_model=schemas.Item)
-def read_item(item_id: int, db: Session = Depends(get_db)):
-    logging.info("READ ONE : %s", item_id)
-    return get_item_or_404(item_id, db)
-
-
-@app.put("/items/{item_id}", response_model=schemas.Item)
-def update_item(item_id: int, item: schemas.ItemCreate, db: Session = Depends(get_db)):
-    logging.info("UPDATE : %s -> %s", item_id, item)
-    db_item = get_item_or_404(item_id, db)
-    for field, value in item.model_dump().items():
-        setattr(db_item, field, value)
-    commit_or_409(db)
-    db.refresh(db_item)
-    return db_item
-
-
-@app.delete("/items/{item_id}")
-def delete_item(item_id: int, db: Session = Depends(get_db)):
-    logging.info("DELETE : %s", item_id)
-    item = get_item_or_404(item_id, db)
-    db.delete(item)
-    db.commit()
-    return {"message": "Item deleted successfully"}
 
 
 # ---------- Categories ----------
