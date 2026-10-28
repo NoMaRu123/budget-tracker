@@ -303,3 +303,100 @@ def test_delete_transaction():
     response = client.delete(f"/transactions/{transaction_id}")
     assert response.status_code == 200
     assert client.get(f"/transactions/{transaction_id}").status_code == 404
+
+
+# ---------- Budgets ----------
+
+def create_test_budget(category_id, month="2026-10", limit_cents=30000):
+    return client.post("/budgets/", json={"month": month, "limit_cents": limit_cents, "category_id": category_id})
+
+
+def test_create_budget():
+    category_id = create_test_category().json()["id"]
+    response = create_test_budget(category_id)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["month"] == "2026-10"
+    assert data["limit_cents"] == 30000
+    assert "id" in data
+
+
+def test_create_budget_unknown_category():
+    response = create_test_budget(category_id=99)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Category not found"}
+
+
+def test_create_budget_duplicate_month():
+    category_id = create_test_category().json()["id"]
+    create_test_budget(category_id, month="2026-10")
+    response = create_test_budget(category_id, month="2026-10")
+    assert response.status_code == 409
+    assert response.json() == {"detail": "A budget for this category and month already exists"}
+
+
+def test_create_budget_same_category_other_month():
+    category_id = create_test_category().json()["id"]
+    create_test_budget(category_id, month="2026-10")
+    response = create_test_budget(category_id, month="2026-11")   # a new month is fine
+    assert response.status_code == 201
+
+
+def test_create_budget_bad_month():
+    category_id = create_test_category().json()["id"]
+    response = create_test_budget(category_id, month="2026-13")
+    assert response.status_code == 422
+
+
+def test_create_budget_zero_limit():
+    category_id = create_test_category().json()["id"]
+    response = create_test_budget(category_id, limit_cents=0)
+    assert response.status_code == 422
+
+
+def test_read_budgets_filter_by_month():
+    groceries_id = create_test_category("Groceries").json()["id"]
+    rent_id = create_test_category("Rent").json()["id"]
+    create_test_budget(groceries_id, month="2026-10")
+    create_test_budget(rent_id, month="2026-10")
+    create_test_budget(groceries_id, month="2026-11")
+    response = client.get("/budgets/?month=2026-10")
+    assert response.status_code == 200
+    assert [b["category_id"] for b in response.json()] == [groceries_id, rent_id]
+
+
+def test_read_budget_not_found():
+    response = client.get("/budgets/99")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Budget not found"}
+
+
+def test_update_budget():
+    category_id = create_test_category().json()["id"]
+    budget_id = create_test_budget(category_id).json()["id"]
+    response = client.put(f"/budgets/{budget_id}", json={"month": "2026-10", "limit_cents": 40000, "category_id": category_id})
+    assert response.status_code == 200
+    assert response.json()["limit_cents"] == 40000
+
+
+def test_update_budget_to_taken_month():
+    category_id = create_test_category().json()["id"]
+    create_test_budget(category_id, month="2026-10")
+    november_id = create_test_budget(category_id, month="2026-11").json()["id"]
+    response = client.put(f"/budgets/{november_id}", json={"month": "2026-10", "limit_cents": 100, "category_id": category_id})
+    assert response.status_code == 409
+
+
+def test_delete_budget():
+    category_id = create_test_category().json()["id"]
+    budget_id = create_test_budget(category_id).json()["id"]
+    response = client.delete(f"/budgets/{budget_id}")
+    assert response.status_code == 200
+    assert client.get(f"/budgets/{budget_id}").status_code == 404
+
+
+def test_delete_category_with_budget():
+    category_id = create_test_category().json()["id"]
+    create_test_budget(category_id)
+    response = client.delete(f"/categories/{category_id}")
+    assert response.status_code == 409   # a budget still uses this category
