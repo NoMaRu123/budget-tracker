@@ -45,4 +45,18 @@ jobs:
       - name: Show the backend address
         run: |
           IP=$(terraform output -raw public_ip)
-          echo "Backend: http://$IP/docs (allow about 3 minutes for the VM to install the app)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Backend: http://$IP/docs" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test the live backend   # is the deployed app actually answering?
+        run: |
+          IP=$(terraform output -raw public_ip)
+          for i in $(seq 1 40); do                    # up to 10 minutes: 40 tries, 15 seconds apart
+            if curl -fsS --max-time 5 "http://$IP/health" | grep -q '"status":"ok"'; then
+              echo "Smoke test passed after $i tries" >> "$GITHUB_STEP_SUMMARY"
+              exit 0                                  # success: stop here, the run goes green
+            fi
+            echo "Try $i: not answering yet (the VM is still installing the app)"
+            sleep 15
+          done
+          echo "Smoke test FAILED: http://$IP/health never answered" >> "$GITHUB_STEP_SUMMARY"
+          exit 1                                      # failure: the run goes red
