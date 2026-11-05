@@ -15,3 +15,9 @@ variable "instance_type" {
   type        = string
   default     = "t2.micro" # Standard free tier type
 }
+
+variable "eip_name" {
+  description = "Name tag of the Elastic IP allocated in the console"
+  type        = string
+  default     = "budget-tracker-eip" # must match the console tag exactly
+}

@@ -76,8 +76,22 @@ resource "aws_instance" "server" {
   }
 }
 
+# Find the Elastic IP made by hand in the console (data = read only, so Destroy never deletes it)
+data "aws_eip" "backend" {
+  filter {
+    name   = "tag:Name"     # search by the Name tag...
+    values = [var.eip_name] # ...for "budget-tracker-eip"
+  }
+}
+
+# Attach it to this deploy's VM (resource = Terraform owns it, so Destroy removes only this link)
+resource "aws_eip_association" "backend" {
+  instance_id   = aws_instance.server.id  # which VM
+  allocation_id = data.aws_eip.backend.id # which Elastic IP
+}
+
 # Output the public IP address
 output "public_ip" {
-  value       = aws_instance.server.public_ip
-  description = "The public IP of your application"
+  value       = data.aws_eip.backend.public_ip # the fixed Elastic IP (was aws_instance.server.public_ip)
+  description = "The fixed public IP of the backend"
 }
