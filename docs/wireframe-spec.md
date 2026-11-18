@@ -80,8 +80,8 @@ How the API reports problems decides how each state looks:
 
 - **422** sends a list: `{"detail": [{"loc": ["body", "amount_cents"], "msg": "Input should be greater than 0"}]}`. The last part of `loc` is the field name, so the error can sit **under the right input** instead of only at the top.
 - **404 and 409** send one sentence: `{"detail": "Category not found"}`. Shown as an alert inside the modal (or on the page for deletes).
-- **Server error (500)**: the server answered, but something broke. Shown as a page or modal alert: "Something went wrong on the server." + "Try again".
-- **Can't reach server**: one state for every case where no answer arrives at all: the backend is down, the address is wrong, or CORS blocked the reply. The browser can't tell these apart (`fetch` fails with no status), so the UI doesn't try: "Can't reach the server. Check your connection and try again." + "Try again".
+- **Server error (500)**: the server answered, but something broke. Shown as a page or modal alert: "Something went wrong." + "Try again". The message stays generic on purpose: no status codes, error details or server names reach the user (OWASP error handling); the details go to `server.log`.
+- **Can't reach server**: one state for every case where no answer arrives at all: the backend is down, the address is wrong, or CORS blocked the reply. The browser can't tell these apart (`fetch` fails with no status), so the UI doesn't try: "Can't connect. Check your connection and try again." + "Try again".
 
 There are no detail pages (no `/transactions/12`), so a 404 only happens inside a modal or on delete: someone (or another tab) deleted the item first.
 
