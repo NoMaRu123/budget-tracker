@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from main import app, get_db
+from main import app, get_db, MAX_UPLOAD_BYTES, MAX_IMPORT_ROWS, euros_to_cents
 from database import Base
 import models
 
@@ -323,3 +323,137 @@ def test_delete_category_with_budget():
     create_test_budget(category_id)
     response = client.delete(f"/categories/{category_id}")
     assert response.status_code == 409   # a budget still uses this category
+
+
+# ---------- CSV import ----------
+
+HEADER = b"date,description,amount,type,category\n"   # the only header the import accepts
+BAD_ENCODING = "This file isn't UTF-8 text. In Excel, use Save As → CSV UTF-8."
+BAD_HEADER = "The header row must be: date,description,amount,type,category"
+
+
+def upload_csv(content: bytes, filename="bank.csv"):
+    # files= sends a multipart/form-data upload, the same as the browser's "Choose file"
+    return client.post("/transactions/import/validate", files={"file": (filename, content, "text/csv")})
+
+
+def test_validate_import_reports_name_size_and_rows():
+    content = HEADER + b"2026-11-14,Tesco,64.35,expense,Groceries\n2026-11-15,Bus,2.00,expense,Transport\n"
+    response = upload_csv(content)
+    assert response.status_code == 200
+    assert response.json() == {"filename": "bank.csv", "size": len(content), "rows": 2}   # header not counted
+
+
+def test_validate_import_without_file():
+    response = client.post("/transactions/import/validate")  # no file attached
+    assert response.status_code == 422
+
+
+# Lesson 2: file name and size
+
+def test_validate_import_rejects_non_csv():
+    response = upload_csv(b"not really a spreadsheet", filename="statement.xlsx")
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Only .csv files can be imported"}
+
+
+def test_validate_import_accepts_upper_case_extension():
+    response = upload_csv(HEADER, filename="BANK.CSV")       # Windows often saves .CSV in capitals
+    assert response.status_code == 200
+
+
+def test_validate_import_accepts_exactly_1mb():
+    content = HEADER + b"\n" * (MAX_UPLOAD_BYTES - len(HEADER))   # padded with blank lines to exactly 1 MB
+    response = upload_csv(content)
+    assert response.status_code == 200
+    assert response.json()["size"] == MAX_UPLOAD_BYTES
+
+
+def test_validate_import_rejects_file_over_1mb():
+    response = upload_csv(b"a" * (MAX_UPLOAD_BYTES + 1))     # one byte over: rejected
+    assert response.status_code == 413
+    assert response.json() == {"detail": "The file is larger than 1 MB"}
+
+
+# Lesson 3: what's inside the file
+
+def test_validate_import_accepts_excel_bom():
+    response = upload_csv(b"\xef\xbb\xbf" + HEADER)          # Excel's "CSV UTF-8" starts with these 3 bytes
+    assert response.status_code == 200
+
+
+def test_validate_import_rejects_latin1():
+    content = HEADER + "2026-11-14,Café,4.50,expense,Eating out\n".encode("latin-1")   # é in an old encoding
+    response = upload_csv(content)
+    assert response.status_code == 400
+    assert response.json() == {"detail": BAD_ENCODING}
+
+
+def test_validate_import_rejects_nul_byte():
+    response = upload_csv(HEADER + b"2026-11-14,Tes\x00co,64.35,expense,Groceries\n")
+    assert response.status_code == 400
+    assert response.json() == {"detail": BAD_ENCODING}
+
+
+def test_validate_import_rejects_wrong_header():
+    response = upload_csv(b"Date,Details,Debit,Credit\n2026-11-14,Tesco,64.35,\n")   # a real bank's layout
+    assert response.status_code == 400
+    assert response.json() == {"detail": BAD_HEADER}
+
+
+def test_validate_import_rejects_empty_file():
+    response = upload_csv(b"")
+    assert response.status_code == 400
+    assert response.json() == {"detail": BAD_HEADER}
+
+
+def test_validate_import_rejects_broken_csv():
+    content = HEADER + b'2026-11-14,"' + b"a" * 200_000 + b"\n"   # a quote that never closes
+    response = upload_csv(content)
+    assert response.status_code == 400
+    assert response.json() == {"detail": "This file isn't a valid CSV file"}
+
+
+# Lesson 4: row limit and amounts
+
+ROW = b"2026-11-14,Tesco,64.35,expense,Groceries\n"   # one data row
+
+
+def test_validate_import_allows_1000_rows():
+    response = upload_csv(HEADER + ROW * MAX_IMPORT_ROWS)        # right on the limit: allowed
+    assert response.status_code == 200
+
+
+def test_validate_import_rejects_1001_rows():
+    response = upload_csv(HEADER + ROW * (MAX_IMPORT_ROWS + 1))  # one row over: rejected
+    assert response.status_code == 400
+    assert response.json() == {"detail": "This file has more than 1,000 rows. Split it into smaller files."}
+
+
+def test_validate_import_blank_lines_dont_count():
+    content = HEADER + ROW * MAX_IMPORT_ROWS + b"\n,,,,\n\n"    # Excel often leaves empty lines at the end
+    response = upload_csv(content)
+    assert response.status_code == 200
+
+
+# Unit tests: euros_to_cents on its own, no server or database involved.
+# parametrize runs the same test once for each pair in the list.
+
+@pytest.mark.parametrize("text, cents", [
+    ("64.35", 6435),    # float maths would give 6434 here
+    ("0.29", 29),
+    ("19.99", 1999),
+    ("64.3", 6430),     # one decimal means tens of cents
+    ("64", 6400),       # no decimals
+    (" 2.00 ", 200),    # spaces around it are fine
+    ("0.00", 0),        # parses; the schema rejects 0 later
+])
+def test_euros_to_cents(text, cents):
+    assert euros_to_cents(text) == cents
+
+
+@pytest.mark.parametrize("text", [
+    "", "abc", "-5.00", "+5", "€5", "1,250.00", "5.555", "5.", ".50", "1e5", "NaN", "1234567890",
+])
+def test_euros_to_cents_rejects(text):
+    assert euros_to_cents(text) is None

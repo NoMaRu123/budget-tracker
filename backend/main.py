@@ -1,7 +1,10 @@
+import csv
 import datetime as dt
+import io
 import logging
+import re
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, UploadFile
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from database import SessionLocal, engine
@@ -172,6 +175,74 @@ def delete_transaction(transaction_id: int, db: Session = Depends(get_db)):
     db.delete(db_transaction)
     db.commit()
     return {"message": "Transaction deleted successfully"}
+
+
+# ---------- CSV import ----------
+
+MAX_UPLOAD_BYTES = 1_000_000  # 1 MB limit from spec 5.1
+MAX_IMPORT_ROWS = 1_000  # row limit from spec 5.1
+AMOUNT_PATTERN = re.compile(r"\d{1,9}(\.\d{1,2})?")  # 64, 64.3 or 64.35: no signs, no €, no commas
+
+
+def read_upload_or_400(file: UploadFile) -> bytes:  # runs every file check; returns the bytes if they pass
+    filename = file.filename or ""  # the name can be missing; "" avoids a crash on .lower()
+    if not filename.lower().endswith(".csv"):  # lower() so BANK.CSV passes too
+        logging.warning("IMPORT REJECTED, not .csv : %r", filename)
+        raise HTTPException(status_code=400, detail="Only .csv files can be imported")
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)  # the +1 "peek" from lesson 1
+    if len(data) > MAX_UPLOAD_BYTES:  # the extra byte arrived, so there's more than 1 MB
+        logging.warning("IMPORT REJECTED, over 1 MB : %r", filename)
+        raise HTTPException(status_code=413, detail="The file is larger than 1 MB")
+    return data
+
+
+EXPECTED_HEADER = ["date", "description", "amount", "type", "category"]  # the first row must be exactly this
+BAD_ENCODING = "This file isn't UTF-8 text. In Excel, use Save As → CSV UTF-8."  # used by two checks below
+
+
+def parse_csv_or_400(data: bytes) -> list[list[str]]:  # bytes in, rows out (each row is a list of cells)
+    try:
+        text = data.decode("utf-8-sig")  # bytes -> text; "-sig" also drops Excel's invisible marker at the start
+    except UnicodeDecodeError:  # not valid UTF-8: an old encoding, or not text at all
+        logging.warning("IMPORT REJECTED, not UTF-8")
+        raise HTTPException(status_code=400, detail=BAD_ENCODING)
+    if "\x00" in text:  # NUL byte: never in a real CSV, common in binary files and UTF-16 text
+        logging.warning("IMPORT REJECTED, NUL byte")
+        raise HTTPException(status_code=400, detail=BAD_ENCODING)
+    try:
+        rows = list(csv.reader(io.StringIO(text)))  # split into rows and cells, in memory only
+    except csv.Error:  # e.g. a quote that never closes, so one cell runs on forever
+        logging.warning("IMPORT REJECTED, broken CSV")
+        raise HTTPException(status_code=400, detail="This file isn't a valid CSV file")
+    if not rows or rows[0] != EXPECTED_HEADER:  # empty file, or the wrong columns
+        logging.warning("IMPORT REJECTED, wrong header")
+        raise HTTPException(status_code=400, detail="The header row must be: date,description,amount,type,category")
+    data_rows = rows[1:]  # everything after the header
+    filled = [row for row in data_rows if not is_blank(row)]  # blank lines don't count towards the limit
+    if len(filled) > MAX_IMPORT_ROWS:
+        logging.warning("IMPORT REJECTED, %s rows", len(filled))
+        raise HTTPException(status_code=400, detail="This file has more than 1,000 rows. Split it into smaller files.")
+    return data_rows  # blank lines kept, so row numbers still match the spreadsheet
+
+
+def is_blank(row: list[str]) -> bool:  # an empty line, or one with only commas like ",,,,"
+    return all(cell.strip() == "" for cell in row)
+
+
+def euros_to_cents(text: str) -> int | None:  # "64.35" -> 6435, or None if it isn't a plain amount
+    text = text.strip()  # " 2.00 " -> "2.00"
+    if not AMOUNT_PATTERN.fullmatch(text):  # the whole text must match, not just part of it
+        return None
+    euros, _, cents = text.partition(".")  # "64.35" -> ("64", ".", "35"); "64" -> ("64", "", "")
+    return int(euros) * 100 + int(cents.ljust(2, "0"))  # pad "3" to "30" and "" to "00"
+
+
+@app.post("/transactions/import/validate")
+def validate_import(file: UploadFile):  # FastAPI takes the file from the form field called "file"
+    data = read_upload_or_400(file)  # stops here with 400 or 413 if the file fails a check
+    rows = parse_csv_or_400(data)  # stops here with 400 if the content is wrong
+    logging.info("IMPORT VALIDATE : %r, %s bytes, %s rows", file.filename, len(data), len(rows))
+    return {"filename": file.filename, "size": len(data), "rows": len(rows)}
 
 
 # ---------- Budgets ----------
