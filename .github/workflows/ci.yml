@@ -32,3 +32,29 @@ jobs:
 
       - name: Run the tests
         run: pytest -v
+
+  library:                        # a second job: the budget-analytics package, tested on its own
+    runs-on: ubuntu-latest        # runs at the same time as the "test" job
+    defaults:
+      run:
+        working-directory: library
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install the test tools
+        run: pip install pytest==9.1.1 flake8==7.4.1 build==1.6.1   # the library itself needs nothing
+
+      - name: Lint with flake8
+        run: flake8 . --count --max-complexity=10 --statistics
+
+      - name: Run the library's unit tests
+        run: pytest -v
+
+      - name: Check that the package builds
+        run: python -m build          # makes the files that get uploaded to PyPI; fails if pyproject.toml is broken

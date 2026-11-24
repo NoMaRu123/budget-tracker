@@ -1,0 +1,27 @@
+# How to build the package: the tool that turns src/ into a file pip can install
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# What PyPI shows, and what pip needs to know
+[project]
+name = "budget-analytics"                 # the name for "pip install budget-analytics"
+version = "0.1.0"                         # bump this for every new upload: PyPI never accepts the same version twice
+description = "Pure budget maths in whole cents: monthly totals, spending per category, budget status and recurring payments"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = []                         # standard library only: nothing extra gets installed
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Office/Business :: Financial",
+]
+
+[project.urls]
+Source = "https://github.com/NoMaRu123/budget-tracker"
+
+# pytest finds the package in src/ without installing it first
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
