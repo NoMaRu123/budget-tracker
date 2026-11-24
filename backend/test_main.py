@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from main import app, get_db, MAX_UPLOAD_BYTES, MAX_IMPORT_ROWS, euros_to_cents
+from observers import TransactionEvents, TransactionObserver
 from database import Base
 import models
 
@@ -580,3 +581,103 @@ def test_import_is_all_or_nothing(monkeypatch):
     response = confirm_csv(HEADER + ROW)
     assert response.status_code == 409
     assert client.get("/transactions/").json() == []          # the good row was rolled back too
+
+
+# ---------- Budget alerts (Observer pattern) ----------
+
+def eating_out_with_budget():
+    # The spec's example (flow 4.5): Eating out has a 150.00 budget for November and 128.60 already spent
+    category_id = create_test_category("Eating out").json()["id"]
+    create_test_budget(category_id, month="2026-11", limit_cents=15000)
+    create_test_transaction(category_id, date="2026-11-10", amount_cents=12860)
+    return category_id
+
+
+def test_transaction_under_budget_has_no_alerts():
+    category_id = eating_out_with_budget()
+    response = create_test_transaction(category_id, date="2026-11-20", amount_cents=1000)   # 138.60 of 150.00
+    assert response.status_code == 201
+    assert response.json()["alerts"] == []
+
+
+def test_transaction_exactly_at_limit_has_no_alerts():
+    category_id = eating_out_with_budget()
+    response = create_test_transaction(category_id, date="2026-11-20", amount_cents=2140)   # exactly 150.00
+    assert response.json()["alerts"] == []
+
+
+def test_transaction_over_budget_returns_alert():
+    category_id = eating_out_with_budget()
+    response = create_test_transaction(category_id, date="2026-11-20", amount_cents=4280)   # "Pizza night", 171.40
+    assert response.status_code == 201
+    assert response.json()["alerts"] == [{"category": "Eating out", "over_by_cents": 2140}]
+
+
+def test_income_never_triggers_an_alert():
+    category_id = eating_out_with_budget()
+    response = create_test_transaction(category_id, date="2026-11-20", amount_cents=99999, kind="income")
+    assert response.json()["alerts"] == []
+
+
+def test_no_budget_means_no_alert():
+    category_id = create_test_category().json()["id"]
+    response = create_test_transaction(category_id, amount_cents=99999)
+    assert response.json()["alerts"] == []
+
+
+def test_other_months_are_not_counted():
+    category_id = eating_out_with_budget()
+    create_test_transaction(category_id, date="2026-10-31", amount_cents=50000)       # October: not November's budget
+    response = create_test_transaction(category_id, date="2026-11-30", amount_cents=100)
+    assert response.json()["alerts"] == []
+
+
+def test_december_budget_counts_the_31st():
+    category_id = create_test_category().json()["id"]
+    create_test_budget(category_id, month="2026-12", limit_cents=1000)
+    create_test_transaction(category_id, date="2026-12-01", amount_cents=600)
+    response = create_test_transaction(category_id, date="2026-12-31", amount_cents=600)   # month end rolls into 2027
+    assert response.json()["alerts"] == [{"category": "Groceries", "over_by_cents": 200}]
+
+
+def test_edit_that_goes_over_budget_returns_alert():
+    category_id = eating_out_with_budget()
+    transaction_id = create_test_transaction(category_id, date="2026-11-20", amount_cents=100).json()["id"]
+    response = client.put(f"/transactions/{transaction_id}", json={
+        "date": "2026-11-20",
+        "description": "Pizza night",
+        "amount_cents": 4280,                                  # edited up from 1.00 to 42.80
+        "type": "expense",
+        "category_id": category_id,
+    })
+    assert response.status_code == 200
+    assert response.json()["alerts"] == [{"category": "Eating out", "over_by_cents": 2140}]
+
+
+class FakeObserver(TransactionObserver):
+    # Records what it was told, so the test can check the subject called it
+    def __init__(self):
+        self.seen = []
+
+    def update(self, transaction, db):
+        self.seen.append(transaction)
+        return []
+
+
+def test_subject_notifies_every_attached_observer():
+    events = TransactionEvents()
+    first, second = FakeObserver(), FakeObserver()
+    events.attach(first)
+    events.attach(second)
+    events.notify("a transaction", db=None)
+    assert first.seen == ["a transaction"]
+    assert second.seen == ["a transaction"]
+
+
+def test_detached_observer_is_not_notified():
+    events = TransactionEvents()
+    observer = FakeObserver()
+    events.attach(observer)
+    events.detach(observer)
+    events.notify("a transaction", db=None)
+    assert observer.seen == []

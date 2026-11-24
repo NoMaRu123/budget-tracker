@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal, engine
 import models
 import schemas
+from observers import BudgetChecker, TransactionEvents, TransactionLogger, month_bounds
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -116,15 +117,22 @@ def get_transaction_or_404(transaction_id: int, db: Session):
 
 def month_range(month: str):
     # "2026-10" -> (1 October 2026, 1 November 2026)
-    start = dt.date.fromisoformat(month + "-01")
-    if start.month == 12:
-        end = dt.date(start.year + 1, 1, 1)
-    else:
-        end = dt.date(start.year, start.month + 1, 1)
-    return start, end
+    return month_bounds(dt.date.fromisoformat(month + "-01"))  # same maths as the budget checker, in one place
 
 
-@app.post("/transactions/", response_model=schemas.Transaction, status_code=201)
+# Observer pattern: the subject, and the observers it tells after every add or edit
+transaction_events = TransactionEvents()
+transaction_events.attach(BudgetChecker())  # adds "over budget" alerts to the reply
+transaction_events.attach(TransactionLogger())  # writes the save to server.log
+
+
+def saved_reply(db_transaction: models.Transaction, db: Session) -> schemas.TransactionSaved:
+    alerts = transaction_events.notify(db_transaction, db)  # every observer runs; we get back their alerts
+    reply = schemas.TransactionSaved.model_validate(db_transaction)  # the transaction, with alerts=[] for now
+    return reply.model_copy(update={"alerts": alerts})  # the same reply with the real alerts filled in
+
+
+@app.post("/transactions/", response_model=schemas.TransactionSaved, status_code=201)
 def create_transaction(transaction: schemas.TransactionCreate, db: Session = Depends(get_db)):
     logging.info("CREATE TRANSACTION : %s", transaction)
     get_category_or_404(transaction.category_id, db)
@@ -132,7 +140,7 @@ def create_transaction(transaction: schemas.TransactionCreate, db: Session = Dep
     db.add(db_transaction)
     db.commit()
     db.refresh(db_transaction)
-    return db_transaction
+    return saved_reply(db_transaction, db)  # saved first, then the observers are told
 
 
 @app.get("/transactions/", response_model=list[schemas.Transaction])
@@ -157,7 +165,7 @@ def read_transaction(transaction_id: int, db: Session = Depends(get_db)):
     return get_transaction_or_404(transaction_id, db)
 
 
-@app.put("/transactions/{transaction_id}", response_model=schemas.Transaction)
+@app.put("/transactions/{transaction_id}", response_model=schemas.TransactionSaved)
 def update_transaction(transaction_id: int, transaction: schemas.TransactionCreate, db: Session = Depends(get_db)):
     logging.info("UPDATE TRANSACTION : %s -> %s", transaction_id, transaction)
     db_transaction = get_transaction_or_404(transaction_id, db)
@@ -166,7 +174,7 @@ def update_transaction(transaction_id: int, transaction: schemas.TransactionCrea
         setattr(db_transaction, field, value)
     db.commit()
     db.refresh(db_transaction)
-    return db_transaction
+    return saved_reply(db_transaction, db)  # an edit can push a category over too (bigger amount, new category)
 
 
 @app.delete("/transactions/{transaction_id}")

@@ -43,6 +43,15 @@ class Transaction(TransactionBase):
     model_config = ConfigDict(from_attributes=True, str_strip_whitespace=True)
 
 
+class BudgetAlert(BaseModel):  # one "over budget" warning, e.g. Eating out, 2140
+    category: str
+    over_by_cents: int
+
+
+class TransactionSaved(Transaction):  # the POST/PUT reply: the saved transaction plus any alerts it set off
+    alerts: list[BudgetAlert] = []
+
+
 class BudgetBase(BaseModel):
     month: str = Field(pattern=MONTH_PATTERN)
     limit_cents: int = Field(gt=0, le=MAX_CENTS)
