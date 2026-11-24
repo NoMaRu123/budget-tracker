@@ -65,3 +65,13 @@ class BudgetCreate(BudgetBase):
 class Budget(BudgetBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
+
+
+class BudgetStatus(BaseModel):  # one row of GET /budgets/status: how much of a budget is used
+    category_id: int
+    category_name: str
+    limit_cents: int
+    spent_cents: int
+    left_cents: int  # negative when over budget
+    percent_used: int
+    status: Literal["ok", "warning", "over"]  # ok under 80%, warning 80 to 100%, over above 100%

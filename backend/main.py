@@ -5,6 +5,7 @@ import logging
 import re
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, HTTPException, Query, UploadFile
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from database import SessionLocal, engine
@@ -361,6 +362,59 @@ def read_budgets(
     if month is not None:
         query = query.filter(models.Budget.month == month)
     return query.order_by(models.Budget.month.desc(), models.Budget.category_id).all()
+
+
+WARNING_PERCENT = 80  # from 80% used, the bar turns to the warning colour
+
+
+def budget_status(limit_cents: int, spent_cents: int) -> dict:  # pure maths, no database: Phase C's library can take it over
+    if spent_cents > limit_cents:  # the same rule as the alerts: exactly at the limit is not over
+        status = "over"
+    elif spent_cents * 100 >= limit_cents * WARNING_PERCENT:  # whole numbers only, so no float rounding at the 80% line
+        status = "warning"
+    else:
+        status = "ok"
+    return {
+        "limit_cents": limit_cents,
+        "spent_cents": spent_cents,
+        "left_cents": limit_cents - spent_cents,  # negative when over: -2140 means 21.40 over
+        "percent_used": round(spent_cents * 100 / limit_cents),  # for the bar and the label, e.g. 86
+        "status": status,
+    }
+
+
+# Declared BEFORE /budgets/{budget_id}: FastAPI checks routes top to bottom, and "status" isn't a budget id
+@app.get("/budgets/status", response_model=list[schemas.BudgetStatus])
+def read_budget_status(
+    month: str = Query(pattern=schemas.MONTH_PATTERN),  # ?month=2026-11 (required)
+    db: Session = Depends(get_db),
+):
+    logging.info("READ BUDGET STATUS : month=%s", month)
+    start, end = month_range(month)
+    spent_by_category = dict(  # one query: {category_id: total spent}, e.g. {1: 17140, 3: 2500}
+        db.query(models.Transaction.category_id, func.sum(models.Transaction.amount_cents))
+        .filter(
+            models.Transaction.type == "expense",  # income never uses up a budget
+            models.Transaction.date >= start,
+            models.Transaction.date < end,
+        )
+        .group_by(models.Transaction.category_id)  # one total per category
+        .all()
+    )
+    budgets = (
+        db.query(models.Budget).join(models.Category)  # join so we can sort by the category's name
+        .filter(models.Budget.month == month)
+        .order_by(models.Category.name)
+        .all()
+    )
+    return [
+        {
+            "category_id": budget.category_id,
+            "category_name": budget.category.name,
+            **budget_status(budget.limit_cents, spent_by_category.get(budget.category_id, 0)),  # 0 if nothing spent
+        }
+        for budget in budgets
+    ]
 
 
 @app.get("/budgets/{budget_id}", response_model=schemas.Budget)

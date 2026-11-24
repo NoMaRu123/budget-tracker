@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from main import app, get_db, MAX_UPLOAD_BYTES, MAX_IMPORT_ROWS, euros_to_cents
+from main import app, get_db, MAX_UPLOAD_BYTES, MAX_IMPORT_ROWS, budget_status, euros_to_cents
 from observers import TransactionEvents, TransactionObserver
 from database import Base
 import models
@@ -681,3 +681,67 @@ def test_detached_observer_is_not_notified():
     events.detach(observer)
     events.notify("a transaction", db=None)
     assert observer.seen == []
+
+
+# ---------- Budget status: GET /budgets/status ----------
+
+def test_budget_status_maths():
+    assert budget_status(10000, 0)["status"] == "ok"
+    assert budget_status(10000, 7999)["status"] == "ok"            # just under 80%
+    assert budget_status(10000, 8000)["status"] == "warning"       # exactly 80%
+    assert budget_status(10000, 10000)["status"] == "warning"      # exactly at the limit is not over
+    assert budget_status(10000, 10001)["status"] == "over"
+    assert budget_status(15000, 17140)["left_cents"] == -2140      # the spec's Eating out example
+    assert budget_status(15000, 12860)["percent_used"] == 86
+
+
+def test_budget_status_with_no_transactions():
+    category_id = create_test_category().json()["id"]
+    create_test_budget(category_id, month="2026-11", limit_cents=40000)
+    response = client.get("/budgets/status?month=2026-11")
+    assert response.status_code == 200
+    assert response.json() == [{
+        "category_id": category_id, "category_name": "Groceries", "limit_cents": 40000,
+        "spent_cents": 0, "left_cents": 40000, "percent_used": 0, "status": "ok",
+    }]
+
+
+def test_budget_status_exactly_at_the_limit():
+    category_id = create_test_category().json()["id"]
+    create_test_budget(category_id, month="2026-11", limit_cents=5000)
+    create_test_transaction(category_id, date="2026-11-03", amount_cents=5000)
+    row = client.get("/budgets/status?month=2026-11").json()[0]
+    assert (row["spent_cents"], row["left_cents"], row["percent_used"], row["status"]) == (5000, 0, 100, "warning")
+
+
+def test_budget_status_over_the_limit():
+    category_id = eating_out_with_budget()                                      # 128.60 of 150.00
+    create_test_transaction(category_id, date="2026-11-20", amount_cents=4280)
+    row = client.get("/budgets/status?month=2026-11").json()[0]
+    assert (row["spent_cents"], row["left_cents"], row["status"]) == (17140, -2140, "over")
+
+
+def test_budget_status_ignores_income_and_other_months():
+    category_id = create_test_category().json()["id"]
+    create_test_budget(category_id, month="2026-11", limit_cents=5000)
+    create_test_transaction(category_id, date="2026-11-03", amount_cents=1000)
+    create_test_transaction(category_id, date="2026-11-04", amount_cents=99999, kind="income")
+    create_test_transaction(category_id, date="2026-10-31", amount_cents=99999)
+    create_test_transaction(category_id, date="2026-12-01", amount_cents=99999)
+    assert client.get("/budgets/status?month=2026-11").json()[0]["spent_cents"] == 1000
+
+
+def test_budget_status_one_row_per_budget_sorted_by_name():
+    groceries = create_test_category("Groceries").json()["id"]
+    eating_out = create_test_category("Eating out").json()["id"]
+    create_test_category("Rent")                                                  # no budget: no row
+    create_test_budget(groceries, month="2026-11")
+    create_test_budget(eating_out, month="2026-11")
+    create_test_budget(groceries, month="2026-12")                               # other month: no row
+    names = [row["category_name"] for row in client.get("/budgets/status?month=2026-11").json()]
+    assert names == ["Eating out", "Groceries"]
+
+
+def test_budget_status_needs_a_valid_month():
+    assert client.get("/budgets/status").status_code == 422
+    assert client.get("/budgets/status?month=2026-13").status_code == 422
