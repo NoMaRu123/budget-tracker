@@ -337,19 +337,12 @@ def upload_csv(content: bytes, filename="bank.csv"):
     return client.post("/transactions/import/validate", files={"file": (filename, content, "text/csv")})
 
 
-def test_validate_import_reports_name_size_and_rows():
-    content = HEADER + b"2026-11-14,Tesco,64.35,expense,Groceries\n2026-11-15,Bus,2.00,expense,Transport\n"
-    response = upload_csv(content)
-    assert response.status_code == 200
-    assert response.json() == {"filename": "bank.csv", "size": len(content), "rows": 2}   # header not counted
-
-
 def test_validate_import_without_file():
     response = client.post("/transactions/import/validate")  # no file attached
     assert response.status_code == 422
 
 
-# Lesson 2: file name and size
+# File name and size
 
 def test_validate_import_rejects_non_csv():
     response = upload_csv(b"not really a spreadsheet", filename="statement.xlsx")
@@ -366,7 +359,6 @@ def test_validate_import_accepts_exactly_1mb():
     content = HEADER + b"\n" * (MAX_UPLOAD_BYTES - len(HEADER))   # padded with blank lines to exactly 1 MB
     response = upload_csv(content)
     assert response.status_code == 200
-    assert response.json()["size"] == MAX_UPLOAD_BYTES
 
 
 def test_validate_import_rejects_file_over_1mb():
@@ -375,7 +367,7 @@ def test_validate_import_rejects_file_over_1mb():
     assert response.json() == {"detail": "The file is larger than 1 MB"}
 
 
-# Lesson 3: what's inside the file
+# File content: encoding, header, CSV format
 
 def test_validate_import_accepts_excel_bom():
     response = upload_csv(b"\xef\xbb\xbf" + HEADER)          # Excel's "CSV UTF-8" starts with these 3 bytes
@@ -414,7 +406,7 @@ def test_validate_import_rejects_broken_csv():
     assert response.json() == {"detail": "This file isn't a valid CSV file"}
 
 
-# Lesson 4: row limit and amounts
+# Row limit and amounts
 
 ROW = b"2026-11-14,Tesco,64.35,expense,Groceries\n"   # one data row
 
@@ -457,3 +449,134 @@ def test_euros_to_cents(text, cents):
 ])
 def test_euros_to_cents_rejects(text):
     assert euros_to_cents(text) is None
+
+
+# Checking each row
+
+def test_validate_import_previews_valid_rows():
+    groceries = create_test_category("Groceries").json()["id"]
+    transport = create_test_category("Transport").json()["id"]
+    content = HEADER + b'2026-11-14,"Tesco, Ranelagh",64.35,expense,Groceries\n2026-11-15,Dublin Bus,2.00,expense,Transport\n'
+    response = upload_csv(content)
+    assert response.status_code == 200
+    assert response.json() == {
+        "valid": 2,
+        "skipped": 0,
+        "rows": [
+            {"date": "2026-11-14", "description": "Tesco, Ranelagh", "amount_cents": 6435,
+             "type": "expense", "category_id": groceries},
+            {"date": "2026-11-15", "description": "Dublin Bus", "amount_cents": 200,
+             "type": "expense", "category_id": transport},
+        ],
+        "errors": [],
+        "imported": 0,
+    }
+
+
+def test_validate_import_saves_nothing():
+    create_test_category("Groceries")
+    upload_csv(HEADER + ROW)
+    assert client.get("/transactions/").json() == []   # validate only checks; nothing reaches the database
+
+
+def test_validate_import_category_name_ignores_case():
+    create_test_category("Groceries")
+    response = upload_csv(HEADER + b"2026-11-14,Tesco,64.35,expense,groceries\n")
+    assert response.json()["valid"] == 1
+
+
+def test_validate_import_reports_row_errors():
+    create_test_category("Groceries")
+    content = HEADER + (
+        b"2026-11-14,Tesco,64.35,expense,Groceries\n"           # row 2: fine
+        b"2026-11-14,Tesco,0.00,expense,Groceries\n"            # row 3: amount 0
+        b"2026-11-14,Gym membership,30.00,expense,Gym\n"        # row 4: no such category
+        b"2026-11-14,=HYPERLINK(\"x\"),1.00,expense,Groceries\n"  # row 5: formula
+        b"\n"                                                     # row 6: blank, skipped
+        b"2026-11-14,Tesco,64.35,spending,Groceries\n"          # row 7: wrong type
+        b"2026-11-14,Tesco,abc,expense,Groceries\n"             # row 8: amount isn't a number
+        b"2026-11-14,Tesco,64.35\n"                             # row 9: only 3 cells
+        b"14/11/2026,Tesco,64.35,expense,Groceries\n"           # row 10: wrong date format
+    )
+    data = upload_csv(content).json()
+    assert data["valid"] == 1
+    assert data["skipped"] == 7
+    assert [(e["row"], e["column"]) for e in data["errors"]] == [
+        (3, "amount"), (4, "category"), (5, "description"), (7, "type"), (8, "amount"), (9, "row"), (10, "date"),
+    ]
+    messages = {e["row"]: e["message"] for e in data["errors"]}
+    assert messages[4] == "no category called 'Gym'"
+    assert messages[5] == "can't start with =, +, - or @"
+    assert messages[8] == "must be a number like 64.35"
+    assert messages[9] == "must have 5 cells: date, description, amount, type, category"
+
+
+@pytest.mark.parametrize("description", ["=1+1", "+SUM(A1:A9)", "-2+3", "@cmd", "\t=1+1"])
+def test_validate_import_blocks_formulas(description):
+    # A spreadsheet runs a cell starting with these as a formula when someone opens an export
+    create_test_category("Groceries")
+    row = f'2026-11-14,"{description}",1.00,expense,Groceries\n'.encode()
+    data = upload_csv(HEADER + row).json()
+    assert data["valid"] == 0
+    assert data["errors"][0]["column"] == "description"
+
+
+def test_validate_import_preview_shows_10_rows():
+    create_test_category("Groceries")
+    data = upload_csv(HEADER + ROW * 15).json()
+    assert data["valid"] == 15            # all 15 count
+    assert len(data["rows"]) == 10        # but only the first 10 are sent back for the preview
+
+
+def test_validate_import_returns_at_most_100_errors():
+    data = upload_csv(HEADER + ROW * 150).json()   # no categories exist, so every row fails
+    assert data["skipped"] == 150
+    assert len(data["errors"]) == 100
+
+
+# Confirm: POST /transactions/import saves the valid rows
+
+def confirm_csv(content: bytes, filename="bank.csv"):
+    return client.post("/transactions/import", files={"file": (filename, content, "text/csv")})
+
+
+def test_import_saves_valid_rows():
+    create_test_category("Groceries")
+    content = HEADER + ROW + ROW + b"2026-11-14,Tesco,0.00,expense,Groceries\n"   # 2 good rows, 1 bad
+    response = confirm_csv(content)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["imported"] == 2
+    assert data["skipped"] == 1
+    assert data["errors"][0]["row"] == 4
+    assert len(client.get("/transactions/").json()) == 2   # really in the database
+
+
+def test_import_with_no_valid_rows_saves_nothing():
+    response = confirm_csv(HEADER + ROW)                     # no categories, so the only row fails
+    assert response.status_code == 400
+    assert response.json() == {"detail": "None of the rows can be imported"}
+    assert client.get("/transactions/").json() == []
+
+
+def test_import_runs_the_file_checks_again():
+    response = confirm_csv(b"not really a spreadsheet", filename="statement.xlsx")
+    assert response.status_code == 400
+
+
+def test_import_is_all_or_nothing(monkeypatch):
+    # Simulate a category being deleted between the check and the save: one row points at a missing category.
+    # The database refuses that row, and the good row must not be saved either.
+    import main
+    create_test_category("Groceries")
+    real_check_rows = main.check_rows
+
+    def check_rows_with_a_missing_category(rows, db):
+        valid, errors, skipped = real_check_rows(rows, db)
+        broken = valid[0].model_copy(update={"category_id": 999})   # no category 999 exists
+        return valid + [broken], errors, skipped
+
+    monkeypatch.setattr(main, "check_rows", check_rows_with_a_missing_category)
+    response = confirm_csv(HEADER + ROW)
+    assert response.status_code == 409
+    assert client.get("/transactions/").json() == []          # the good row was rolled back too

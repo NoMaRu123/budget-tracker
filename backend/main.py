@@ -12,6 +12,7 @@ import models
 import schemas
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -237,12 +238,85 @@ def euros_to_cents(text: str) -> int | None:  # "64.35" -> 6435, or None if it i
     return int(euros) * 100 + int(cents.ljust(2, "0"))  # pad "3" to "30" and "" to "00"
 
 
+PREVIEW_ROWS = 10  # how many valid rows the preview sends back
+MAX_ERRORS = 100  # error limit from spec 5.1
+FORMULA_STARTS = ("=", "+", "-", "@")  # a spreadsheet runs a cell starting with one of these as a formula
+COLUMN_FOR_FIELD = {"amount_cents": "amount", "category_id": "category"}  # schema field name -> CSV column name
+
+
+def row_error(number: int, column: str, message: str) -> dict:  # one entry in the "errors" list
+    return {"row": number, "column": column, "message": message}
+
+
+def check_row(number: int, row: list[str], categories: dict[str, int]):  # returns (transaction, []) or (None, errors)
+    if len(row) != len(EXPECTED_HEADER):  # too few or too many cells: the unpacking below would crash
+        return None, [row_error(number, "row", "must have 5 cells: date, description, amount, type, category")]
+    date, description, amount, type_, category = row  # unpack the 5 cells into 5 names
+    errors = []
+    if description.strip().startswith(FORMULA_STARTS):  # strip first, so a hidden tab before "=" is caught too
+        errors.append(row_error(number, "description", "can't start with =, +, - or @"))
+    amount_cents = euros_to_cents(amount)  # "64.35" -> 6435, or None
+    if amount_cents is None:
+        errors.append(row_error(number, "amount", "must be a number like 64.35"))
+    category_id = categories.get(category.strip().lower())  # "Groceries" -> 1, or None if there's no such category
+    if category_id is None:
+        errors.append(row_error(number, "category", f"no category called '{category.strip()[:50]}'"))
+    if errors:  # don't build a transaction from broken parts
+        return None, errors
+    try:
+        transaction = schemas.TransactionCreate(  # the same checks as the Add transaction form
+            date=date, description=description, amount_cents=amount_cents, type=type_, category_id=category_id,
+        )
+    except ValidationError as pydantic_error:  # Pydantic lists every field that broke a rule
+        for problem in pydantic_error.errors():  # copy each problem into our own errors list
+            field = problem["loc"][0]  # loc is ("amount_cents",); [0] takes the field name out
+            errors.append(row_error(number, COLUMN_FOR_FIELD.get(field, field), problem["msg"]))  # field -> column name
+        return None, errors
+    return transaction, []
+
+
+def check_rows(rows: list[list[str]], db: Session):  # every row; used by both import routes
+    categories = {category.name.lower(): category.id for category in db.query(models.Category).all()}  # one query
+    valid, errors, skipped = [], [], 0
+    for number, row in enumerate(rows, start=2):  # start=2: the header is row 1 in Excel
+        if is_blank(row):
+            continue  # skip it, but the row numbers keep counting
+        transaction, row_errors = check_row(number, row, categories)
+        if transaction is None:
+            skipped += 1
+            errors.extend(row_errors)  # add all of this row's errors to the list
+        else:
+            valid.append(transaction)
+    return valid, errors, skipped
+
+
 @app.post("/transactions/import/validate")
-def validate_import(file: UploadFile):  # FastAPI takes the file from the form field called "file"
-    data = read_upload_or_400(file)  # stops here with 400 or 413 if the file fails a check
-    rows = parse_csv_or_400(data)  # stops here with 400 if the content is wrong
-    logging.info("IMPORT VALIDATE : %r, %s bytes, %s rows", file.filename, len(data), len(rows))
-    return {"filename": file.filename, "size": len(data), "rows": len(rows)}
+def validate_import(file: UploadFile, db: Session = Depends(get_db)):  # step 1: check and preview, save nothing
+    data = read_upload_or_400(file)  # 400 or 413 if the file fails a check
+    rows = parse_csv_or_400(data)  # 400 if the content is wrong
+    valid, errors, skipped = check_rows(rows, db)  # row by row
+    logging.info("IMPORT VALIDATE : %r, %s valid, %s skipped", file.filename, len(valid), skipped)
+    return {
+        "valid": len(valid),
+        "skipped": skipped,  # rows with at least one error
+        "rows": [transaction.model_dump() for transaction in valid[:PREVIEW_ROWS]],  # the preview table
+        "errors": errors[:MAX_ERRORS],
+        "imported": 0,  # validate never saves
+    }
+
+
+@app.post("/transactions/import", status_code=201)
+def confirm_import(file: UploadFile, db: Session = Depends(get_db)):  # step 2: the same file again, then save
+    data = read_upload_or_400(file)  # every check runs again: the preview from step 1 is never trusted
+    rows = parse_csv_or_400(data)
+    valid, errors, skipped = check_rows(rows, db)
+    if not valid:
+        logging.warning("IMPORT REJECTED, no valid rows : %r", file.filename)
+        raise HTTPException(status_code=400, detail="None of the rows can be imported")
+    db.add_all([models.Transaction(**transaction.model_dump()) for transaction in valid])  # queued, not saved yet
+    commit_or_409(db, "A category was deleted during the import. Check the file again.")  # one commit: all or none
+    logging.info("IMPORT SAVED : %r, %s imported, %s skipped", file.filename, len(valid), skipped)
+    return {"valid": len(valid), "skipped": skipped, "rows": [], "errors": errors[:MAX_ERRORS], "imported": len(valid)}
 
 
 # ---------- Budgets ----------
